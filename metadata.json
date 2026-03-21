@@ -1,0 +1,8 @@
+{
+  "name": "AI 智能学习助手 (AI Study Assistant)",
+  "description": "一个集题目采集、智能批改、错题管理与变式训练于一体的多模态 AI 学习平台。支持 LaTeX 公式渲染、多种大模型接入及明文 JSON 存储。",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
