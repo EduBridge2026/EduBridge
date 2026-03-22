@@ -3,10 +3,12 @@ import json
 import uuid
 import time
 import base64
+import asyncio
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 import uvicorn
@@ -60,6 +62,11 @@ class UserProfile(BaseModel):
     id: str
     name: str
     preferences: Dict[str, Any] = {}
+
+class EnsureSolutionRequest(BaseModel):
+    provider: Optional[str] = "gemini"
+    model: Optional[str] = None
+    api_key: Optional[str] = None
 
 class Question(BaseModel):
     id: str
@@ -238,6 +245,97 @@ async def process_question(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/ai/process/stream")
+async def process_question_stream(
+    type: str = Form(...), # 'ocr_ai' or 'ai_direct'
+    provider: str = Form(...), # 'qwen', 'deepseek', 'kimi', 'gemini'
+    model: str = Form(None),
+    api_key: str = Form(None),
+    text: str = Form(None),
+    file: UploadFile = File(None)
+):
+    image_bytes = await file.read() if file else None
+
+    extraction_prompt = """
+    你是一个专业的题目采集助手。请将输入的题目内容（图片或文本）转换为结构化的 JSON 格式。
+    如果是图片，请先识别其中的文字和数学公式（使用 LaTeX 渲染）。
+    
+    你只需要做“题面提取”，不要展开推理，不要详细讲解。
+    
+    输出格式必须符合以下 JSON 模式：
+    {
+      "type": "choice | fill | essay",
+      "content": "题干内容，数学公式用 $...$ 包裹",
+      "options": ["A. ...", "B. ...", "C. ...", "D. ..."] // 仅选择题需要
+    }
+    """
+
+    if text:
+        extraction_prompt += f"\n题目文本内容：\n{text}"
+
+    extraction_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "type": {"type": "STRING"},
+            "content": {"type": "STRING"},
+            "options": {"type": "ARRAY", "items": {"type": "STRING"}}
+        },
+        "required": ["type", "content"]
+    }
+
+    async def event_stream():
+        try:
+            yield json.dumps({"event": "stage", "data": {"message": "已接收请求，准备识别题目..."}}) + "\n"
+            await asyncio.sleep(0)
+
+            extracted = await call_ai(provider, api_key, extraction_prompt, image_bytes, extraction_schema, model)
+            extracted = ensure_mapping_result(extracted, "题目采集")
+
+            extracted_type = extracted.get("type", "essay")
+            extracted_content = extracted.get("content", "") or ""
+            extracted_options = extracted.get("options") if isinstance(extracted.get("options"), list) else []
+
+            yield json.dumps({"event": "partial", "data": {"type": extracted_type}}, ensure_ascii=False) + "\n"
+            await asyncio.sleep(0)
+
+            if extracted_content:
+                yield json.dumps({"event": "stage", "data": {"message": "正在同步题干内容..."}}) + "\n"
+                chunk_size = 28
+                for i in range(0, len(extracted_content), chunk_size):
+                    chunk = extracted_content[i:i + chunk_size]
+                    yield json.dumps({"event": "partial", "data": {"content_chunk": chunk}}, ensure_ascii=False) + "\n"
+                    await asyncio.sleep(0.01)
+
+            if extracted_options:
+                yield json.dumps({"event": "stage", "data": {"message": "正在同步选项..."}}) + "\n"
+                for option in extracted_options:
+                    yield json.dumps({"event": "partial", "data": {"option": option}}, ensure_ascii=False) + "\n"
+                    await asyncio.sleep(0.01)
+
+            yield json.dumps({"event": "stage", "data": {"message": "已完成题面提取，正在保存..."}}) + "\n"
+            await asyncio.sleep(0)
+
+            question_id = str(uuid.uuid4())
+            question_data = {
+                "id": question_id,
+                "created_at": time.time(),
+                "source": "text" if text else "image",
+                "type": extracted_type,
+                "content": extracted_content,
+                "options": extracted_options or None,
+                "answer": None,
+                "analysis": None
+            }
+            save_json(os.path.join(QUESTIONS_DIR, f"{question_id}.json"), question_data)
+
+            yield json.dumps({"event": "result", "data": question_data}, ensure_ascii=False) + "\n"
+        except HTTPException as e:
+            yield json.dumps({"event": "error", "data": {"detail": e.detail}}) + "\n"
+        except Exception as e:
+            yield json.dumps({"event": "error", "data": {"detail": str(e)}}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
 @app.post("/api/ai/correct")
 async def correct_answer(
     question_id: str = Form(...),
@@ -340,6 +438,133 @@ async def correct_answer(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/ai/correct/stream")
+async def correct_answer_stream(
+    question_id: str = Form(...),
+    user_answer: str = Form(None),
+    file: UploadFile = File(None),
+    provider: str = Form(...),
+    model: str = Form(None),
+    api_key: str = Form(None)
+):
+    question_path = os.path.join(QUESTIONS_DIR, f"{question_id}.json")
+    question = load_json(question_path)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    image_bytes = await file.read() if file else None
+
+    async def emit_text_chunks(field: str, text: str, chunk_size: int = 28):
+        if not text:
+            return
+        for i in range(0, len(text), chunk_size):
+            yield json.dumps({"event": "partial", "data": {f"{field}_chunk": text[i:i + chunk_size]}}, ensure_ascii=False) + "\n"
+            await asyncio.sleep(0.01)
+
+    async def event_stream():
+        try:
+            if not question.get("answer") or not question.get("analysis"):
+                yield json.dumps({"event": "stage", "data": {"message": "正在生成标准答案与解析..."}}) + "\n"
+                await asyncio.sleep(0)
+
+                fill_schema = {
+                    "type": "OBJECT",
+                    "properties": {
+                        "answer": {"type": "STRING"},
+                        "analysis": {"type": "STRING"}
+                    },
+                    "required": ["answer", "analysis"]
+                }
+                fill_prompt = f"""
+                你是一个专业的题目解析助手。请根据以下题目信息生成“正确答案”和“标准解析”。
+                请优先保证数学与逻辑严谨，解析步骤清晰。
+
+                题目类型：{question.get('type', '')}
+                题干：{question.get('content', '')}
+                选项：{json.dumps(question.get('options', []), ensure_ascii=False)}
+
+                输出 JSON:
+                {{
+                  "answer": "正确答案",
+                  "analysis": "详细解析过程"
+                }}
+                """
+                filled = await call_ai(provider, api_key, fill_prompt, None, fill_schema, model)
+                filled = ensure_mapping_result(filled, "标准答案生成")
+                question["answer"] = filled.get("answer", "")
+                question["analysis"] = filled.get("analysis", "")
+                save_json(question_path, question)
+
+            async for chunk in emit_text_chunks("answer", question.get("answer", "")):
+                yield chunk
+            async for chunk in emit_text_chunks("analysis", question.get("analysis", "")):
+                yield chunk
+
+            yield json.dumps({"event": "stage", "data": {"message": "正在批改作答..."}}) + "\n"
+            await asyncio.sleep(0)
+
+            prompt = f"""
+            你是一个专业的题目批改助手。请根据以下题目内容和用户提交的答案进行批改。
+            
+            题目内容：{question['content']}
+            正确答案：{question['answer']}
+            标准解析：{question['analysis']}
+            
+            用户提交的内容：{user_answer if user_answer else "见图片附件"}
+            
+            请输出以下 JSON 格式：
+            {{
+              "is_correct": boolean,
+              "score": number (0-10),
+              "feedback": "总体评价和改进建议",
+              "steps": ["步骤1...", "步骤2..."],
+              "error_type": "计算失误 | 公式记忆偏差 | 逻辑断层 | 无"
+            }}
+            """
+            schema = {
+                "type": "OBJECT",
+                "properties": {
+                    "is_correct": {"type": "BOOLEAN"},
+                    "score": {"type": "NUMBER"},
+                    "feedback": {"type": "STRING"},
+                    "steps": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "error_type": {"type": "STRING"}
+                },
+                "required": ["is_correct", "score", "feedback", "steps", "error_type"]
+            }
+
+            result = await call_ai(provider, api_key, prompt, image_bytes, schema, model)
+            result = ensure_mapping_result(result, "智能批改")
+
+            attempt = {
+                "id": str(uuid.uuid4()),
+                "submitted_at": time.time(),
+                "provider": provider,
+                "model": model,
+                "user_answer": user_answer if user_answer else "",
+                "has_image_submission": bool(image_bytes),
+                "analysis": result
+            }
+            question.setdefault("attempts", []).append(attempt)
+            save_json(question_path, question)
+
+            payload = {
+                "question_id": question_id,
+                "user_answer": user_answer or "image_submitted",
+                "attempt_id": attempt["id"],
+                "attempts_count": len(question["attempts"]),
+                "question_answer": question.get("answer"),
+                "question_analysis": question.get("analysis"),
+                **result
+            }
+            yield json.dumps({"event": "result", "data": payload}, ensure_ascii=False) + "\n"
+        except HTTPException as e:
+            yield json.dumps({"event": "error", "data": {"detail": e.detail}}) + "\n"
+        except Exception as e:
+            yield json.dumps({"event": "error", "data": {"detail": str(e)}}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
 @app.post("/api/ai/variants")
 async def generate_variants(
     question_id: str = Form(...),
@@ -429,6 +654,62 @@ async def list_questions():
         if f.endswith(".json"):
             questions.append(load_json(os.path.join(QUESTIONS_DIR, f)))
     return sorted(questions, key=lambda x: x['created_at'], reverse=True)
+
+@app.post("/api/questions/{question_id}/ensure-solution")
+async def ensure_solution(question_id: str, req: EnsureSolutionRequest):
+    question_path = os.path.join(QUESTIONS_DIR, f"{question_id}.json")
+    question = load_json(question_path)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if question.get("answer") and question.get("analysis"):
+        return {
+            "question_id": question_id,
+            "generated": False,
+            "answer": question.get("answer"),
+            "analysis": question.get("analysis"),
+        }
+
+    fill_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "answer": {"type": "STRING"},
+            "analysis": {"type": "STRING"}
+        },
+        "required": ["answer", "analysis"]
+    }
+    fill_prompt = f"""
+    你是一个专业的题目解析助手。请根据以下题目信息生成“正确答案”和“标准解析”。
+    请优先保证数学与逻辑严谨，解析步骤清晰。
+
+    题目类型：{question.get('type', '')}
+    题干：{question.get('content', '')}
+    选项：{json.dumps(question.get('options', []), ensure_ascii=False)}
+
+    输出 JSON:
+    {{
+      "answer": "正确答案",
+      "analysis": "详细解析过程"
+    }}
+    """
+
+    try:
+        provider = req.provider or "gemini"
+        result = await call_ai(provider, req.api_key, fill_prompt, None, fill_schema, req.model)
+        result = ensure_mapping_result(result, "标准答案生成")
+        question["answer"] = result.get("answer", "")
+        question["analysis"] = result.get("analysis", "")
+        save_json(question_path, question)
+        return {
+            "question_id": question_id,
+            "generated": True,
+            "answer": question["answer"],
+            "analysis": question["analysis"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Serve static files in production
 if os.path.exists("dist"):

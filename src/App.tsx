@@ -91,6 +91,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [answerDraft, setAnswerDraft] = useState('');
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
+  const [loadingMessage, setLoadingMessage] = useState('AI 正在思考中...');
   
   // Settings
   const [imageAI, setImageAI] = useState<AIConfig>({
@@ -112,13 +113,20 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const answerFileRef = useRef<HTMLInputElement>(null);
+  const bootstrappedRef = useRef(false);
 
   useEffect(() => {
+    if (bootstrappedRef.current) return;
+    bootstrappedRef.current = true;
     loadHistory();
     loadLocalSettings();
   }, []);
 
   const parseApiErrorMessage = (err: unknown) => {
+    if (err instanceof Error && err.message) {
+      return err.message;
+    }
+
     const buildFriendlyMessage = (rawText?: string, requestId?: string) => {
       const text = (rawText || '').toLowerCase();
       const rid = requestId ? `（请求ID: ${requestId}）` : '';
@@ -225,9 +233,6 @@ export default function App() {
         if (saved.processMode === 'ocr_ai' || saved.processMode === 'ai_direct') {
           setProcessMode(saved.processMode);
         }
-        if (saved.activeTab === 'collect' || saved.activeTab === 'history' || saved.activeTab === 'settings') {
-          setActiveTab(saved.activeTab);
-        }
       }
     } catch (err) {
       console.error("Failed to load local settings", err);
@@ -239,7 +244,6 @@ export default function App() {
     localStorage.setItem(
       SETTINGS_STORAGE_KEY,
       JSON.stringify({
-        activeTab,
         processMode,
         imageAI,
         ocrAI,
@@ -256,6 +260,35 @@ export default function App() {
       setQuestions(data);
     } catch (err) {
       handleApiError("Failed to load history", err);
+    }
+  };
+
+  const ensureQuestionSolutionInBackground = async (questionId: string) => {
+    try {
+      const data = await aiService.ensureQuestionSolution(questionId, {
+        provider: analysisAI.provider,
+        model: analysisAI.model,
+        api_key: analysisAI.apiKey || undefined,
+      });
+      if (!data?.answer && !data?.analysis) return;
+
+      setCurrentQuestion((prev) => {
+        if (!prev || prev.id !== questionId) return prev;
+        return {
+          ...prev,
+          answer: data.answer ?? prev.answer,
+          analysis: data.analysis ?? prev.analysis,
+        };
+      });
+      setQuestions((prev) =>
+        prev.map((q) =>
+          q.id === questionId
+            ? { ...q, answer: data.answer ?? q.answer, analysis: data.analysis ?? q.analysis }
+            : q
+        )
+      );
+    } catch (err) {
+      console.error('Ensure solution failed', err);
     }
   };
 
@@ -307,16 +340,65 @@ export default function App() {
     if (selectedAI.apiKey) formData.append('api_key', selectedAI.apiKey);
 
     setLoading(true);
+    setLoadingMessage('正在发送图片并启动识别...');
+    setActiveTab('collect');
+    setCurrentQuestion({
+      id: `stream-${Date.now()}`,
+      type: 'essay',
+      content: '',
+      options: [],
+      answer: undefined,
+      analysis: undefined,
+      created_at: Date.now() / 1000,
+      source: 'image',
+    });
+    setCorrection(null);
+    setVariants([]);
     try {
-      const result = await aiService.processQuestion(formData);
-      setCurrentQuestion(result);
-      setQuestions([result, ...questions]);
+      let finalResult: any = null;
+      await aiService.processQuestionStream(formData, (event) => {
+        if (event.event === 'stage') {
+          setLoadingMessage(event.data?.message || 'AI 正在处理中...');
+          return;
+        }
+        if (event.event === 'partial') {
+          setCurrentQuestion((prev) => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            if (event.data?.type) {
+              next.type = event.data.type;
+            }
+            if (event.data?.content_chunk) {
+              next.content = `${next.content || ''}${event.data.content_chunk}`;
+            }
+            if (event.data?.option) {
+              const existing = next.options || [];
+              next.options = [...existing, event.data.option];
+            }
+            return next;
+          });
+          return;
+        }
+        if (event.event === 'result') {
+          finalResult = event.data;
+          return;
+        }
+        if (event.event === 'error') {
+          throw new Error(event.data?.detail || '流式处理失败');
+        }
+      });
+      if (!finalResult) {
+        throw new Error('未收到有效结果，请重试');
+      }
+      setCurrentQuestion(finalResult);
+      setQuestions([finalResult, ...questions]);
       setCorrection(null);
       setAnswerDraft('');
     } catch (err) {
       handleApiError("Upload failed", err);
     } finally {
       setLoading(false);
+      setLoadingMessage('AI 正在思考中...');
     }
   };
 
@@ -331,16 +413,65 @@ export default function App() {
     if (selectedAI.apiKey) formData.append('api_key', selectedAI.apiKey);
 
     setLoading(true);
+    setLoadingMessage('正在提交文本并启动处理...');
+    setActiveTab('collect');
+    setCurrentQuestion({
+      id: `stream-${Date.now()}`,
+      type: 'essay',
+      content: '',
+      options: [],
+      answer: undefined,
+      analysis: undefined,
+      created_at: Date.now() / 1000,
+      source: 'text',
+    });
+    setCorrection(null);
+    setVariants([]);
     try {
-      const result = await aiService.processQuestion(formData);
-      setCurrentQuestion(result);
-      setQuestions([result, ...questions]);
+      let finalResult: any = null;
+      await aiService.processQuestionStream(formData, (event) => {
+        if (event.event === 'stage') {
+          setLoadingMessage(event.data?.message || 'AI 正在处理中...');
+          return;
+        }
+        if (event.event === 'partial') {
+          setCurrentQuestion((prev) => {
+            if (!prev) return prev;
+            const next = { ...prev };
+            if (event.data?.type) {
+              next.type = event.data.type;
+            }
+            if (event.data?.content_chunk) {
+              next.content = `${next.content || ''}${event.data.content_chunk}`;
+            }
+            if (event.data?.option) {
+              const existing = next.options || [];
+              next.options = [...existing, event.data.option];
+            }
+            return next;
+          });
+          return;
+        }
+        if (event.event === 'result') {
+          finalResult = event.data;
+          return;
+        }
+        if (event.event === 'error') {
+          throw new Error(event.data?.detail || '流式处理失败');
+        }
+      });
+      if (!finalResult) {
+        throw new Error('未收到有效结果，请重试');
+      }
+      setCurrentQuestion(finalResult);
+      setQuestions([finalResult, ...questions]);
       setCorrection(null);
       setAnswerDraft('');
     } catch (err) {
       handleApiError("Submit failed", err);
     } finally {
       setLoading(false);
+      setLoadingMessage('AI 正在思考中...');
     }
   };
 
@@ -355,13 +486,66 @@ export default function App() {
     if (analysisAI.apiKey) formData.append('api_key', analysisAI.apiKey);
 
     setLoading(true);
+    setLoadingMessage('正在准备批改...');
     try {
-      const result = await aiService.correctQuestion(formData);
-      setCorrection(result);
+      let finalResult: any = null;
+      let streamedAnswer = '';
+      let streamedAnalysis = '';
+
+      await aiService.correctQuestionStream(formData, (event) => {
+        if (event.event === 'stage') {
+          setLoadingMessage(event.data?.message || 'AI 正在处理中...');
+          return;
+        }
+        if (event.event === 'partial') {
+          let hasUpdate = false;
+          if (event.data?.answer_chunk) {
+            streamedAnswer += event.data.answer_chunk;
+            hasUpdate = true;
+          }
+          if (event.data?.analysis_chunk) {
+            streamedAnalysis += event.data.analysis_chunk;
+            hasUpdate = true;
+          }
+          if (hasUpdate) {
+            setCurrentQuestion((prev) => {
+              if (!prev) return prev;
+              return {
+                ...prev,
+                answer: streamedAnswer || prev.answer,
+                analysis: streamedAnalysis || prev.analysis,
+              };
+            });
+          }
+          return;
+        }
+        if (event.event === 'result') {
+          finalResult = event.data;
+          return;
+        }
+        if (event.event === 'error') {
+          throw new Error(event.data?.detail || '流式处理失败');
+        }
+      });
+
+      if (!finalResult) {
+        throw new Error('未收到有效批改结果，请重试');
+      }
+
+      setCurrentQuestion((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          answer: finalResult.question_answer ?? prev.answer,
+          analysis: finalResult.question_analysis ?? prev.analysis,
+        };
+      });
+      setCorrection(finalResult);
     } catch (err) {
       handleApiError("Correction failed", err);
     } finally {
       setLoading(false);
+      setLoadingMessage('AI 正在思考中...');
     }
   };
 
@@ -683,6 +867,7 @@ export default function App() {
                       setCurrentQuestion(q);
                       setActiveTab('collect');
                       setAnswerDraft('');
+                      ensureQuestionSolutionInBackground(q.id);
                     }}
                     className="bg-white p-6 rounded-3xl border border-black/5 hover:border-black/20 transition-all cursor-pointer group"
                   >
@@ -888,7 +1073,7 @@ export default function App() {
           >
             <div className="flex flex-col items-center gap-4">
               <Loader2 className="w-10 h-10 animate-spin text-black" />
-              <p className="text-sm font-medium animate-pulse">AI 正在思考中...</p>
+              <p className="text-sm font-medium animate-pulse">{loadingMessage}</p>
             </div>
           </motion.div>
         )}
