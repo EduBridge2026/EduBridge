@@ -44,6 +44,12 @@ interface CorrectionResult {
   error_type?: string;
 }
 
+interface AIConfig {
+  provider: Provider;
+  model: string;
+  apiKey: string;
+}
+
 const SETTINGS_STORAGE_KEY = 'edubridge_settings_v1';
 const MODEL_OPTIONS: Record<Provider, { value: string; label: string }[]> = {
   gemini: [
@@ -52,6 +58,8 @@ const MODEL_OPTIONS: Record<Provider, { value: string; label: string }[]> = {
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   ],
   qwen: [
+    { value: 'qwen-vl-max', label: 'Qwen VL Max (图片识别)' },
+    { value: 'qwen-vl-plus', label: 'Qwen VL Plus (图片识别)' },
     { value: 'qwen-max', label: 'Qwen Max' },
     { value: 'qwen-plus', label: 'Qwen Plus' },
     { value: 'qwen-turbo', label: 'Qwen Turbo' },
@@ -81,11 +89,25 @@ export default function App() {
   const [correction, setCorrection] = useState<CorrectionResult | null>(null);
   const [variants, setVariants] = useState<Question[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [answerDraft, setAnswerDraft] = useState('');
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   
   // Settings
-  const [provider, setProvider] = useState<Provider>('gemini');
-  const [model, setModel] = useState(getDefaultModel('gemini'));
-  const [apiKey, setApiKey] = useState('');
+  const [imageAI, setImageAI] = useState<AIConfig>({
+    provider: 'gemini',
+    model: getDefaultModel('gemini'),
+    apiKey: '',
+  });
+  const [ocrAI, setOcrAI] = useState<AIConfig>({
+    provider: 'qwen',
+    model: getDefaultModel('qwen'),
+    apiKey: '',
+  });
+  const [analysisAI, setAnalysisAI] = useState<AIConfig>({
+    provider: 'deepseek',
+    model: getDefaultModel('deepseek'),
+    apiKey: '',
+  });
   const [processMode, setProcessMode] = useState<'ocr_ai' | 'ai_direct'>('ocr_ai');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -95,13 +117,6 @@ export default function App() {
     loadHistory();
     loadLocalSettings();
   }, []);
-
-  useEffect(() => {
-    localStorage.setItem(
-      SETTINGS_STORAGE_KEY,
-      JSON.stringify({ provider, model, apiKey, processMode })
-    );
-  }, [provider, model, apiKey, processMode]);
 
   const parseApiErrorMessage = (err: unknown) => {
     const buildFriendlyMessage = (rawText?: string, requestId?: string) => {
@@ -173,24 +188,66 @@ export default function App() {
       const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
-        const savedProvider = isValidProvider(saved.provider) ? saved.provider : 'gemini';
-        setProvider(savedProvider);
-        if (typeof saved.model === 'string' && isValidModelForProvider(savedProvider, saved.model)) {
-          setModel(saved.model);
+        const normalizeConfig = (
+          maybeConfig: any,
+          fallbackProvider: Provider,
+          fallbackApiKey = ''
+        ): AIConfig => {
+          const nextProvider = isValidProvider(maybeConfig?.provider)
+            ? maybeConfig.provider
+            : fallbackProvider;
+          const nextModel = typeof maybeConfig?.model === 'string' && isValidModelForProvider(nextProvider, maybeConfig.model)
+            ? maybeConfig.model
+            : getDefaultModel(nextProvider);
+          const nextApiKey = typeof maybeConfig?.apiKey === 'string'
+            ? maybeConfig.apiKey
+            : fallbackApiKey;
+          return { provider: nextProvider, model: nextModel, apiKey: nextApiKey };
+        };
+
+        if (saved.imageAI || saved.ocrAI || saved.analysisAI) {
+          setImageAI(normalizeConfig(saved.imageAI, 'gemini'));
+          setOcrAI(normalizeConfig(saved.ocrAI, 'qwen'));
+          setAnalysisAI(normalizeConfig(saved.analysisAI, 'deepseek'));
         } else {
-          setModel(getDefaultModel(savedProvider));
+          // Backward compatibility with legacy single-provider settings.
+          const legacyProvider = isValidProvider(saved.provider) ? saved.provider : 'gemini';
+          const legacyModel = typeof saved.model === 'string' && isValidModelForProvider(legacyProvider, saved.model)
+            ? saved.model
+            : getDefaultModel(legacyProvider);
+          const legacyApiKey = typeof saved.apiKey === 'string' ? saved.apiKey : '';
+          const legacyConfig = { provider: legacyProvider, model: legacyModel, apiKey: legacyApiKey };
+          setImageAI(legacyConfig);
+          setOcrAI(legacyConfig);
+          setAnalysisAI(legacyConfig);
         }
-        if (typeof saved.apiKey === 'string') {
-          setApiKey(saved.apiKey);
-        }
+
         if (saved.processMode === 'ocr_ai' || saved.processMode === 'ai_direct') {
           setProcessMode(saved.processMode);
+        }
+        if (saved.activeTab === 'collect' || saved.activeTab === 'history' || saved.activeTab === 'settings') {
+          setActiveTab(saved.activeTab);
         }
       }
     } catch (err) {
       console.error("Failed to load local settings", err);
       localStorage.removeItem(SETTINGS_STORAGE_KEY);
     }
+  };
+
+  const saveLocalSettings = () => {
+    localStorage.setItem(
+      SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        activeTab,
+        processMode,
+        imageAI,
+        ocrAI,
+        analysisAI,
+      })
+    );
+    setSettingsMessage('设置已保存到本地');
+    setTimeout(() => setSettingsMessage(null), 1800);
   };
 
   const loadHistory = async () => {
@@ -206,9 +263,9 @@ export default function App() {
     if (!currentQuestion) return;
     const formData = new FormData();
     formData.append('question_id', currentQuestion.id);
-    formData.append('provider', provider);
-    formData.append('model', model);
-    if (apiKey) formData.append('api_key', apiKey);
+    formData.append('provider', analysisAI.provider);
+    formData.append('model', analysisAI.model);
+    if (analysisAI.apiKey) formData.append('api_key', analysisAI.apiKey);
 
     setLoading(true);
     try {
@@ -241,12 +298,13 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const selectedAI = processMode === 'ai_direct' ? imageAI : ocrAI;
     const formData = new FormData();
     formData.append('file', file);
     formData.append('type', processMode);
-    formData.append('provider', provider);
-    formData.append('model', model);
-    if (apiKey) formData.append('api_key', apiKey);
+    formData.append('provider', selectedAI.provider);
+    formData.append('model', selectedAI.model);
+    if (selectedAI.apiKey) formData.append('api_key', selectedAI.apiKey);
 
     setLoading(true);
     try {
@@ -254,6 +312,7 @@ export default function App() {
       setCurrentQuestion(result);
       setQuestions([result, ...questions]);
       setCorrection(null);
+      setAnswerDraft('');
     } catch (err) {
       handleApiError("Upload failed", err);
     } finally {
@@ -263,12 +322,13 @@ export default function App() {
 
   const handleTextSubmit = async (text: string) => {
     if (!text.trim()) return;
+    const selectedAI = processMode === 'ai_direct' ? imageAI : ocrAI;
     const formData = new FormData();
     formData.append('text', text);
-    formData.append('type', 'ai_direct');
-    formData.append('provider', provider);
-    formData.append('model', model);
-    if (apiKey) formData.append('api_key', apiKey);
+    formData.append('type', processMode);
+    formData.append('provider', selectedAI.provider);
+    formData.append('model', selectedAI.model);
+    if (selectedAI.apiKey) formData.append('api_key', selectedAI.apiKey);
 
     setLoading(true);
     try {
@@ -276,6 +336,7 @@ export default function App() {
       setCurrentQuestion(result);
       setQuestions([result, ...questions]);
       setCorrection(null);
+      setAnswerDraft('');
     } catch (err) {
       handleApiError("Submit failed", err);
     } finally {
@@ -289,9 +350,9 @@ export default function App() {
     formData.append('question_id', currentQuestion.id);
     if (answer) formData.append('user_answer', answer);
     if (file) formData.append('file', file);
-    formData.append('provider', provider);
-    formData.append('model', model);
-    if (apiKey) formData.append('api_key', apiKey);
+    formData.append('provider', analysisAI.provider);
+    formData.append('model', analysisAI.model);
+    if (analysisAI.apiKey) formData.append('api_key', analysisAI.apiKey);
 
     setLoading(true);
     try {
@@ -418,7 +479,10 @@ export default function App() {
                   {/* Question Display */}
                   <div className="bg-white rounded-3xl p-8 border border-black/5 shadow-sm relative">
                     <button 
-                      onClick={() => setCurrentQuestion(null)}
+                      onClick={() => {
+                        setCurrentQuestion(null);
+                        setAnswerDraft('');
+                      }}
                       className="absolute top-6 right-6 p-2 hover:bg-black/5 rounded-full transition-colors"
                     >
                       <Plus className="w-5 h-5 rotate-45" />
@@ -459,6 +523,8 @@ export default function App() {
                           placeholder="在此输入你的答案..."
                           className="w-full h-32 p-4 bg-[#F9F9F7] rounded-2xl border border-black/5 focus:outline-none focus:border-black/20 transition-all resize-none"
                           id="user-answer-input"
+                          value={answerDraft}
+                          onChange={(e) => setAnswerDraft(e.target.value)}
                         />
                         <div className="flex gap-4">
                           <button 
@@ -469,10 +535,7 @@ export default function App() {
                             上传手写过程
                           </button>
                           <button 
-                            onClick={() => {
-                              const input = document.getElementById('user-answer-input') as HTMLTextAreaElement;
-                              handleCorrection(input.value);
-                            }}
+                            onClick={() => handleCorrection(answerDraft)}
                             className="flex-1 py-4 bg-black text-white rounded-2xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
                           >
                             <CheckCircle2 className="w-5 h-5" />
@@ -486,7 +549,7 @@ export default function App() {
                           accept="image/*" 
                           onChange={(e) => {
                             const file = e.target.files?.[0];
-                            if (file) handleCorrection('', file);
+                            if (file) handleCorrection(answerDraft, file);
                           }}
                         />
                       </div>
@@ -619,6 +682,7 @@ export default function App() {
                     onClick={() => {
                       setCurrentQuestion(q);
                       setActiveTab('collect');
+                      setAnswerDraft('');
                     }}
                     className="bg-white p-6 rounded-3xl border border-black/5 hover:border-black/20 transition-all cursor-pointer group"
                   >
@@ -648,56 +712,6 @@ export default function App() {
               className="max-w-xl mx-auto space-y-8"
             >
               <section className="space-y-4">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-black/30">模型配置</h3>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">选择大模型提供商</label>
-                    <select 
-                      value={provider}
-                      onChange={(e) => {
-                        const nextProvider = e.target.value as Provider;
-                        setProvider(nextProvider);
-                        setModel(getDefaultModel(nextProvider));
-                      }}
-                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
-                    >
-                      <option value="qwen">通义千问 (Qwen)</option>
-                      <option value="deepseek">DeepSeek (仅推理)</option>
-                      <option value="kimi">Kimi (Moonshot)</option>
-                      <option value="gemini">Google Gemini</option>
-                    </select>
-                    {provider === 'deepseek' && (
-                      <p className="text-[10px] text-rose-500 font-medium">注意：DeepSeek 目前不支持视觉任务，请使用文本输入。</p>
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">选择模型版本</label>
-                    <select
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
-                    >
-                      {MODEL_OPTIONS[provider].map((item) => (
-                        <option key={item.value} value={item.value}>
-                          {item.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium">API Key (可选)</label>
-                    <input 
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="留空则使用系统默认配置"
-                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
-                    />
-                  </div>
-                </div>
-              </section>
-
-              <section className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-black/30">处理策略</h3>
                 <div className="grid grid-cols-2 gap-4">
                   <button 
@@ -717,7 +731,143 @@ export default function App() {
                 </div>
               </section>
 
+              <section className="space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-black/30">模型配置</h3>
+                <div className="space-y-4">
+                  {processMode === 'ai_direct' ? (
+                    <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
+                      <label className="text-sm font-medium">识图 AI（拍照上传 / AI 一步到位）</label>
+                      <select 
+                        value={imageAI.provider}
+                        onChange={(e) => {
+                          const nextProvider = e.target.value as Provider;
+                          setImageAI({
+                            ...imageAI,
+                            provider: nextProvider,
+                            model: getDefaultModel(nextProvider),
+                          });
+                        }}
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      >
+                        <option value="qwen">通义千问 (Qwen)</option>
+                        <option value="deepseek">DeepSeek (仅推理)</option>
+                        <option value="kimi">Kimi (Moonshot)</option>
+                        <option value="gemini">Google Gemini</option>
+                      </select>
+                      {imageAI.provider === 'deepseek' && (
+                        <p className="text-[10px] text-rose-500 font-medium">注意：DeepSeek 目前不支持视觉任务，请使用文本输入。</p>
+                      )}
+                      <select
+                        value={imageAI.model}
+                        onChange={(e) => setImageAI({...imageAI, model: e.target.value})}
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      >
+                        {MODEL_OPTIONS[imageAI.provider].map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                      <input 
+                        type="password"
+                        value={imageAI.apiKey}
+                        onChange={(e) => setImageAI({...imageAI, apiKey: e.target.value})}
+                        placeholder="该功能使用的 API Key（可选）"
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
+                      <label className="text-sm font-medium">OCR + 简单处理 AI</label>
+                      <select 
+                        value={ocrAI.provider}
+                        onChange={(e) => {
+                          const nextProvider = e.target.value as Provider;
+                          setOcrAI({
+                            ...ocrAI,
+                            provider: nextProvider,
+                            model: getDefaultModel(nextProvider),
+                          });
+                        }}
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      >
+                        <option value="qwen">通义千问 (Qwen)</option>
+                        <option value="deepseek">DeepSeek (仅推理)</option>
+                        <option value="kimi">Kimi (Moonshot)</option>
+                        <option value="gemini">Google Gemini</option>
+                      </select>
+                      <select
+                        value={ocrAI.model}
+                        onChange={(e) => setOcrAI({...ocrAI, model: e.target.value})}
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      >
+                        {MODEL_OPTIONS[ocrAI.provider].map((item) => (
+                          <option key={item.value} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+                      <input 
+                        type="password"
+                        value={ocrAI.apiKey}
+                        onChange={(e) => setOcrAI({...ocrAI, apiKey: e.target.value})}
+                        placeholder="该功能使用的 API Key（可选）"
+                        className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                      />
+                    </div>
+                  )}
+
+                  <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
+                    <label className="text-sm font-medium">分析做法 AI（答案解析生成 / 批改 / 变式）</label>
+                    <select 
+                      value={analysisAI.provider}
+                      onChange={(e) => {
+                        const nextProvider = e.target.value as Provider;
+                        setAnalysisAI({
+                          ...analysisAI,
+                          provider: nextProvider,
+                          model: getDefaultModel(nextProvider),
+                        });
+                      }}
+                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                    >
+                      <option value="qwen">通义千问 (Qwen)</option>
+                      <option value="deepseek">DeepSeek (仅推理)</option>
+                      <option value="kimi">Kimi (Moonshot)</option>
+                      <option value="gemini">Google Gemini</option>
+                    </select>
+                    <select
+                      value={analysisAI.model}
+                      onChange={(e) => setAnalysisAI({...analysisAI, model: e.target.value})}
+                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                    >
+                      {MODEL_OPTIONS[analysisAI.provider].map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input 
+                      type="password"
+                      value={analysisAI.apiKey}
+                      onChange={(e) => setAnalysisAI({...analysisAI, apiKey: e.target.value})}
+                      placeholder="该功能使用的 API Key（可选）"
+                      className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
+                    />
+                  </div>
+                </div>
+              </section>
+
               <div className="pt-6 border-t border-black/5">
+                <button
+                  onClick={saveLocalSettings}
+                  className="w-full py-3 bg-black text-white rounded-xl font-medium hover:opacity-90 transition-opacity"
+                >
+                  确认保存设置
+                </button>
+                {settingsMessage && (
+                  <p className="text-xs text-center text-emerald-600 mt-2">{settingsMessage}</p>
+                )}
                 <p className="text-[10px] text-center text-black/30 uppercase tracking-widest font-bold">
                   AI Study Assistant v1.0.0
                 </p>

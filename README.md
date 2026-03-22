@@ -21,6 +21,8 @@
   - `gemini-2.5-flash`
   - `gemini-2.5-pro`
 - **通义千问 Qwen（阿里云 DashScope 兼容模式）**
+  - `qwen-vl-max`（支持图片识别）
+  - `qwen-vl-plus`（支持图片识别）
   - `qwen-max`
   - `qwen-plus`
   - `qwen-turbo`

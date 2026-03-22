@@ -50,10 +50,11 @@ for d in [DATA_DIR, USERS_DIR, QUESTIONS_DIR, VARIANTS_DIR]:
 
 SUPPORTED_MODELS = {
     "gemini": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"],
-    "qwen": ["qwen-max", "qwen-plus", "qwen-turbo"],
+    "qwen": ["qwen-vl-max", "qwen-vl-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "kimi": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
 }
+QWEN_VISION_MODELS = {"qwen-vl-max", "qwen-vl-plus"}
 
 class UserProfile(BaseModel):
     id: str
@@ -81,6 +82,23 @@ def load_json(path):
         return None
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+def ensure_mapping_result(result: Any, context: str) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"{context} 返回格式异常：模型未返回 JSON 对象，请切换模型或重试。"
+    )
 
 # AI Call Helper
 async def call_ai(provider: str, api_key: str, prompt: str, image_data: Optional[bytes] = None, response_schema: Optional[Dict] = None, model: Optional[str] = None):
@@ -131,12 +149,24 @@ async def call_ai(provider: str, api_key: str, prompt: str, image_data: Optional
             raise HTTPException(status_code=400, detail=f"Unsupported model for {provider}: {selected_model}")
             
         client = OpenAI(api_key=api_key, base_url=base_urls.get(provider))
-        
-        messages = [{"role": "user", "content": prompt}]
-        
-        # Note: DeepSeek doesn't support images. Qwen/Kimi might need specific multimodal endpoints.
-        # For simplicity, we'll assume text-only for these unless they are multimodal.
-        # If image is provided and model is not multimodal, we'd need an OCR step.
+
+        if image_data:
+            if provider != "qwen":
+                raise HTTPException(status_code=400, detail=f"{provider} 当前不支持图片识别，请使用文本输入或切换到 Gemini/Qwen。")
+
+            if selected_model not in QWEN_VISION_MODELS:
+                selected_model = "qwen-vl-max"
+
+            image_b64 = base64.b64encode(image_data).decode("utf-8")
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                ],
+            }]
+        else:
+            messages = [{"role": "user", "content": prompt}]
         
         response = client.chat.completions.create(
             model=selected_model,
@@ -159,43 +189,47 @@ async def process_question(
 ):
     image_bytes = await file.read() if file else None
     
-    prompt = """
+    extraction_prompt = """
     你是一个专业的题目采集助手。请将输入的题目内容（图片或文本）转换为结构化的 JSON 格式。
     如果是图片，请先识别其中的文字和数学公式（使用 LaTeX 渲染）。
+    
+    你只需要做“题面提取”，不要展开推理，不要详细讲解。
     
     输出格式必须符合以下 JSON 模式：
     {
       "type": "choice | fill | essay",
       "content": "题干内容，数学公式用 $...$ 包裹",
-      "options": ["A. ...", "B. ...", "C. ...", "D. ..."], // 仅选择题需要
-      "answer": "正确答案",
-      "analysis": "详细解析过程"
+      "options": ["A. ...", "B. ...", "C. ...", "D. ..."] // 仅选择题需要
     }
     """
     
     if text:
-        prompt += f"\n题目文本内容：\n{text}"
+        extraction_prompt += f"\n题目文本内容：\n{text}"
     
-    schema = {
+    extraction_schema = {
         "type": "OBJECT",
         "properties": {
             "type": {"type": "STRING"},
             "content": {"type": "STRING"},
-            "options": {"type": "ARRAY", "items": {"type": "STRING"}},
-            "answer": {"type": "STRING"},
-            "analysis": {"type": "STRING"}
+            "options": {"type": "ARRAY", "items": {"type": "STRING"}}
         },
-        "required": ["type", "content", "answer", "analysis"]
+        "required": ["type", "content"]
     }
-    
+
     try:
-        result = await call_ai(provider, api_key, prompt, image_bytes, schema, model)
+        extracted = await call_ai(provider, api_key, extraction_prompt, image_bytes, extraction_schema, model)
+        extracted = ensure_mapping_result(extracted, "题目采集")
+
         question_id = str(uuid.uuid4())
         question_data = {
             "id": question_id,
             "created_at": time.time(),
             "source": "text" if text else "image",
-            **result
+            "type": extracted.get("type", "essay"),
+            "content": extracted.get("content", ""),
+            "options": extracted.get("options"),
+            "answer": None,
+            "analysis": None
         }
         save_json(os.path.join(QUESTIONS_DIR, f"{question_id}.json"), question_data)
         return question_data
@@ -213,12 +247,42 @@ async def correct_answer(
     model: str = Form(None),
     api_key: str = Form(None)
 ):
-    question = load_json(os.path.join(QUESTIONS_DIR, f"{question_id}.json"))
+    question_path = os.path.join(QUESTIONS_DIR, f"{question_id}.json")
+    question = load_json(question_path)
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
         
     image_bytes = await file.read() if file else None
     
+    if not question.get("answer") or not question.get("analysis"):
+        fill_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "answer": {"type": "STRING"},
+                "analysis": {"type": "STRING"}
+            },
+            "required": ["answer", "analysis"]
+        }
+        fill_prompt = f"""
+        你是一个专业的题目解析助手。请根据以下题目信息生成“正确答案”和“标准解析”。
+        请优先保证数学与逻辑严谨，解析步骤清晰。
+
+        题目类型：{question.get('type', '')}
+        题干：{question.get('content', '')}
+        选项：{json.dumps(question.get('options', []), ensure_ascii=False)}
+
+        输出 JSON:
+        {{
+          "answer": "正确答案",
+          "analysis": "详细解析过程"
+        }}
+        """
+        filled = await call_ai(provider, api_key, fill_prompt, None, fill_schema, model)
+        filled = ensure_mapping_result(filled, "标准答案生成")
+        question["answer"] = filled.get("answer", "")
+        question["analysis"] = filled.get("analysis", "")
+        save_json(question_path, question)
+
     prompt = f"""
     你是一个专业的题目批改助手。请根据以下题目内容和用户提交的答案进行批改。
     
@@ -252,9 +316,23 @@ async def correct_answer(
     
     try:
         result = await call_ai(provider, api_key, prompt, image_bytes, schema, model)
+        result = ensure_mapping_result(result, "智能批改")
+        attempt = {
+            "id": str(uuid.uuid4()),
+            "submitted_at": time.time(),
+            "provider": provider,
+            "model": model,
+            "user_answer": user_answer if user_answer else "",
+            "has_image_submission": bool(image_bytes),
+            "analysis": result
+        }
+        question.setdefault("attempts", []).append(attempt)
+        save_json(question_path, question)
         return {
             "question_id": question_id,
             "user_answer": user_answer or "image_submitted",
+            "attempt_id": attempt["id"],
+            "attempts_count": len(question["attempts"]),
             **result
         }
     except HTTPException:
@@ -317,6 +395,7 @@ async def generate_variants(
     
     try:
         result = await call_ai(provider, api_key, prompt, None, schema, model)
+        result = ensure_mapping_result(result, "变式生成")
         # Save variants
         save_json(os.path.join(VARIANTS_DIR, f"{question_id}.json"), result)
         return result
