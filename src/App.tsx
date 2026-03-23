@@ -32,6 +32,7 @@ interface Question {
   analysis?: string;
   created_at: number;
   source: string;
+  attempts?: AttemptRecord[];
 }
 
 interface CorrectionResult {
@@ -42,6 +43,22 @@ interface CorrectionResult {
   feedback: string;
   steps?: string[];
   error_type?: string;
+}
+
+interface AttemptRecord {
+  id: string;
+  submitted_at: number;
+  provider: string;
+  model?: string;
+  user_answer: string;
+  has_image_submission: boolean;
+  analysis: {
+    is_correct: boolean;
+    score: number;
+    feedback: string;
+    steps?: string[];
+    error_type?: string;
+  };
 }
 
 interface AIConfig {
@@ -80,6 +97,7 @@ const isValidProvider = (value: string): value is Provider =>
   value === 'qwen' || value === 'deepseek' || value === 'kimi' || value === 'gemini';
 const isValidModelForProvider = (nextProvider: Provider, model: string) =>
   MODEL_OPTIONS[nextProvider].some((item) => item.value === model);
+const DEFAULT_TEXT_QUESTION = '已知 a^2 + b^2 = 25,尝试求3a + 4b 的取值范围';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'collect' | 'history' | 'settings'>('collect');
@@ -90,6 +108,7 @@ export default function App() {
   const [variants, setVariants] = useState<Question[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [answerDraft, setAnswerDraft] = useState('');
+  const [collectTextDraft, setCollectTextDraft] = useState('');
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [loadingMessage, setLoadingMessage] = useState('AI 正在思考中...');
   
@@ -114,6 +133,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const answerFileRef = useRef<HTMLInputElement>(null);
   const bootstrappedRef = useRef(false);
+  const ensureInFlightRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (bootstrappedRef.current) return;
@@ -121,6 +141,18 @@ export default function App() {
     loadHistory();
     loadLocalSettings();
   }, []);
+
+  useEffect(() => {
+    if (!currentQuestion) return;
+    if (currentQuestion.id.startsWith('stream-')) return;
+    if (currentQuestion.answer && currentQuestion.analysis) return;
+    if (ensureInFlightRef.current.has(currentQuestion.id)) return;
+
+    ensureInFlightRef.current.add(currentQuestion.id);
+    ensureQuestionSolutionInBackground(currentQuestion.id).finally(() => {
+      ensureInFlightRef.current.delete(currentQuestion.id);
+    });
+  }, [currentQuestion]);
 
   const parseApiErrorMessage = (err: unknown) => {
     if (err instanceof Error && err.message) {
@@ -368,8 +400,9 @@ export default function App() {
             if (event.data?.type) {
               next.type = event.data.type;
             }
-            if (event.data?.content_chunk) {
-              next.content = `${next.content || ''}${event.data.content_chunk}`;
+            const contentChunk = event.data?.content_chunk ?? event.data?.text_chunk;
+            if (contentChunk) {
+              next.content = `${next.content || ''}${contentChunk}`;
             }
             if (event.data?.option) {
               const existing = next.options || [];
@@ -391,7 +424,7 @@ export default function App() {
         throw new Error('未收到有效结果，请重试');
       }
       setCurrentQuestion(finalResult);
-      setQuestions([finalResult, ...questions]);
+      setQuestions((prev) => [finalResult, ...prev]);
       setCorrection(null);
       setAnswerDraft('');
     } catch (err) {
@@ -403,10 +436,10 @@ export default function App() {
   };
 
   const handleTextSubmit = async (text: string) => {
-    if (!text.trim()) return;
+    const effectiveText = text.trim() ? text : DEFAULT_TEXT_QUESTION;
     const selectedAI = processMode === 'ai_direct' ? imageAI : ocrAI;
     const formData = new FormData();
-    formData.append('text', text);
+    formData.append('text', effectiveText);
     formData.append('type', processMode);
     formData.append('provider', selectedAI.provider);
     formData.append('model', selectedAI.model);
@@ -441,8 +474,9 @@ export default function App() {
             if (event.data?.type) {
               next.type = event.data.type;
             }
-            if (event.data?.content_chunk) {
-              next.content = `${next.content || ''}${event.data.content_chunk}`;
+            const contentChunk = event.data?.content_chunk ?? event.data?.text_chunk;
+            if (contentChunk) {
+              next.content = `${next.content || ''}${contentChunk}`;
             }
             if (event.data?.option) {
               const existing = next.options || [];
@@ -464,9 +498,10 @@ export default function App() {
         throw new Error('未收到有效结果，请重试');
       }
       setCurrentQuestion(finalResult);
-      setQuestions([finalResult, ...questions]);
+      setQuestions((prev) => [finalResult, ...prev]);
       setCorrection(null);
       setAnswerDraft('');
+      setCollectTextDraft('');
     } catch (err) {
       handleApiError("Submit failed", err);
     } finally {
@@ -499,8 +534,9 @@ export default function App() {
         }
         if (event.event === 'partial') {
           let hasUpdate = false;
-          if (event.data?.answer_chunk) {
-            streamedAnswer += event.data.answer_chunk;
+          const answerChunk = event.data?.answer_chunk ?? event.data?.text_chunk;
+          if (answerChunk) {
+            streamedAnswer += answerChunk;
             hasUpdate = true;
           }
           if (event.data?.analysis_chunk) {
@@ -534,12 +570,58 @@ export default function App() {
 
       setCurrentQuestion((prev) => {
         if (!prev) return prev;
+        const newAttempt: AttemptRecord = {
+          id: finalResult.attempt_id || `attempt-${Date.now()}`,
+          submitted_at: Date.now() / 1000,
+          provider: analysisAI.provider,
+          model: analysisAI.model,
+          user_answer: finalResult.user_answer ?? (answer || (file ? 'image_submitted' : '')),
+          has_image_submission: Boolean(file),
+          analysis: {
+            is_correct: finalResult.is_correct,
+            score: finalResult.score,
+            feedback: finalResult.feedback,
+            steps: finalResult.steps,
+            error_type: finalResult.error_type,
+          },
+        };
+        const existingAttempts = Array.isArray(prev.attempts) ? prev.attempts : [];
         return {
           ...prev,
           answer: finalResult.question_answer ?? prev.answer,
           analysis: finalResult.question_analysis ?? prev.analysis,
+          attempts: [newAttempt, ...existingAttempts],
         };
       });
+      setQuestions((prev) =>
+        prev.map((q) =>
+          q.id === currentQuestion.id
+            ? {
+                ...q,
+                answer: finalResult.question_answer ?? q.answer,
+                analysis: finalResult.question_analysis ?? q.analysis,
+                attempts: [
+                  {
+                    id: finalResult.attempt_id || `attempt-${Date.now()}`,
+                    submitted_at: Date.now() / 1000,
+                    provider: analysisAI.provider,
+                    model: analysisAI.model,
+                    user_answer: finalResult.user_answer ?? (answer || (file ? 'image_submitted' : '')),
+                    has_image_submission: Boolean(file),
+                    analysis: {
+                      is_correct: finalResult.is_correct,
+                      score: finalResult.score,
+                      feedback: finalResult.feedback,
+                      steps: finalResult.steps,
+                      error_type: finalResult.error_type,
+                    },
+                  },
+                  ...(Array.isArray(q.attempts) ? q.attempts : []),
+                ],
+              }
+            : q
+        )
+      );
       setCorrection(finalResult);
     } catch (err) {
       handleApiError("Correction failed", err);
@@ -636,20 +718,21 @@ export default function App() {
                       <span className="font-medium">文本输入题意</span>
                     </div>
                     <textarea 
-                      placeholder="输入题目内容，AI 将自动格式化..."
+                      placeholder={DEFAULT_TEXT_QUESTION}
                       className="flex-1 bg-transparent resize-none focus:outline-none text-sm leading-relaxed"
+                      value={collectTextDraft}
+                      onChange={(e) => setCollectTextDraft(e.currentTarget.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && e.metaKey) {
-                          handleTextSubmit(e.currentTarget.value);
+                          handleTextSubmit(collectTextDraft);
                         }
                       }}
                     />
                     <div className="flex justify-between items-center mt-4">
                       <span className="text-[10px] uppercase tracking-wider text-black/30 font-bold">Cmd + Enter 发送</span>
                       <button 
-                        onClick={(e) => {
-                          const textarea = e.currentTarget.parentElement?.previousElementSibling as HTMLTextAreaElement;
-                          handleTextSubmit(textarea.value);
+                        onClick={() => {
+                          handleTextSubmit(collectTextDraft);
                         }}
                         className="p-2 bg-black text-white rounded-xl hover:opacity-80 transition-opacity"
                       >
@@ -837,6 +920,46 @@ export default function App() {
                       )}
                     </motion.div>
                   )}
+
+                  {Array.isArray(currentQuestion.attempts) && currentQuestion.attempts.length > 0 && (
+                    <div className="bg-white rounded-3xl p-8 border border-black/5 shadow-sm space-y-4">
+                      <h3 className="font-semibold">历次作答与点评</h3>
+                      <div className="space-y-4">
+                        {[...currentQuestion.attempts]
+                          .sort((a, b) => (b.submitted_at || 0) - (a.submitted_at || 0))
+                          .map((attempt, idx) => (
+                            <div key={attempt.id || `${attempt.submitted_at}-${idx}`} className="p-4 bg-[#F9F9F7] rounded-2xl border border-black/5 space-y-2">
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-black/50">
+                                <span>第 {currentQuestion.attempts!.length - idx} 次</span>
+                                <span>·</span>
+                                <span>{new Date((attempt.submitted_at || 0) * 1000).toLocaleString()}</span>
+                                <span>·</span>
+                                <span>{attempt.provider}{attempt.model ? ` / ${attempt.model}` : ''}</span>
+                              </div>
+                              <p className="text-sm">
+                                作答：{attempt.user_answer || (attempt.has_image_submission ? '（图片作答）' : '（空）')}
+                              </p>
+                              <p className={`text-sm font-medium ${attempt.analysis?.is_correct ? 'text-emerald-600' : 'text-rose-600'}`}>
+                                结果：{attempt.analysis?.is_correct ? '正确' : '错误'}，得分 {attempt.analysis?.score ?? '-'} / 10
+                              </p>
+                              <p className="text-sm leading-relaxed">点评：{attempt.analysis?.feedback || '暂无点评'}</p>
+                              {attempt.analysis?.error_type && (
+                                <p className="text-xs text-black/50">错因类型：{attempt.analysis.error_type}</p>
+                              )}
+                              {attempt.analysis?.steps && attempt.analysis.steps.length > 0 && (
+                                <div className="space-y-1">
+                                  {attempt.analysis.steps.map((s, i) => (
+                                    <p key={`${attempt.id}-step-${i}`} className="text-xs text-black/60">
+                                      {i + 1}. {s}
+                                    </p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </motion.div>
@@ -867,7 +990,6 @@ export default function App() {
                       setCurrentQuestion(q);
                       setActiveTab('collect');
                       setAnswerDraft('');
-                      ensureQuestionSolutionInBackground(q.id);
                     }}
                     className="bg-white p-6 rounded-3xl border border-black/5 hover:border-black/20 transition-all cursor-pointer group"
                   >

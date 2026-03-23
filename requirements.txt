@@ -6,3 +6,4 @@ httpx
 python-dotenv
 google-genai
 openai
+request
