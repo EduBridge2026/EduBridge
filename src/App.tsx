@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { 
-  Camera, 
-  Type, 
-  Send, 
-  History, 
-  Settings, 
-  CheckCircle2, 
-  XCircle, 
-  ChevronRight, 
+import {
+  Camera,
+  Type,
+  Send,
+  History,
+  Settings,
+  CheckCircle2,
+  XCircle,
+  ChevronRight,
   Loader2,
   Plus,
   Image as ImageIcon,
@@ -58,11 +58,9 @@ const MODEL_OPTIONS: Record<Provider, { value: string; label: string }[]> = {
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
   ],
   qwen: [
-    { value: 'qwen-vl-max', label: 'Qwen VL Max (图片识别)' },
-    { value: 'qwen-vl-plus', label: 'Qwen VL Plus (图片识别)' },
-    { value: 'qwen-max', label: 'Qwen Max' },
-    { value: 'qwen-plus', label: 'Qwen Plus' },
-    { value: 'qwen-turbo', label: 'Qwen Turbo' },
+    { value: 'qwen3-max', label: 'Qwen Max' },
+    { value: 'qwen3.5-plus', label: 'Qwen Plus' },
+    { value: 'qwen3.5-flash', label: 'Qwen Flash' },
   ],
   deepseek: [
     { value: 'deepseek-chat', label: 'DeepSeek Chat' },
@@ -92,7 +90,7 @@ export default function App() {
   const [answerDraft, setAnswerDraft] = useState('');
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [loadingMessage, setLoadingMessage] = useState('AI 正在思考中...');
-  
+
   // Settings
   const [imageAI, setImageAI] = useState<AIConfig>({
     provider: 'gemini',
@@ -576,19 +574,19 @@ export default function App() {
           <h1 className="text-xl font-semibold tracking-tight">AI Study Assistant</h1>
         </div>
         <nav className="flex gap-1 bg-black/5 p-1 rounded-xl">
-          <button 
+          <button
             onClick={() => setActiveTab('collect')}
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'collect' ? 'bg-white shadow-sm' : 'hover:bg-white/50'}`}
           >
             采集答题
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('history')}
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'history' ? 'bg-white shadow-sm' : 'hover:bg-white/50'}`}
           >
             错题库
           </button>
-          <button 
+          <button
             onClick={() => setActiveTab('settings')}
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'settings' ? 'bg-white shadow-sm' : 'hover:bg-white/50'}`}
           >
@@ -600,7 +598,7 @@ export default function App() {
       <main className="max-w-4xl mx-auto p-6">
         <AnimatePresence mode="wait">
           {activeTab === 'collect' && (
-            <motion.div 
+            <motion.div
               key="collect"
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
@@ -610,7 +608,7 @@ export default function App() {
               {/* Collection Area */}
               {!currentQuestion ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <button 
+                  <button
                     onClick={() => fileInputRef.current?.click()}
                     className="group relative h-64 bg-white border-2 border-dashed border-black/10 rounded-3xl flex flex-col items-center justify-center gap-4 hover:border-black/30 transition-all overflow-hidden"
                   >
@@ -621,11 +619,11 @@ export default function App() {
                       <p className="font-medium">拍照/上传题目</p>
                       <p className="text-sm text-black/40">支持 OCR 或 AI 直接识别</p>
                     </div>
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      className="hidden" 
-                      accept="image/*" 
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      className="hidden"
+                      accept="image/*"
                       onChange={handleUpload}
                     />
                   </button>
@@ -635,7 +633,7 @@ export default function App() {
                       <Type className="w-5 h-5 text-black/40" />
                       <span className="font-medium">文本输入题意</span>
                     </div>
-                    <textarea 
+                    <textarea
                       placeholder="输入题目内容，AI 将自动格式化..."
                       className="flex-1 bg-transparent resize-none focus:outline-none text-sm leading-relaxed"
                       onKeyDown={(e) => {
@@ -646,7 +644,7 @@ export default function App() {
                     />
                     <div className="flex justify-between items-center mt-4">
                       <span className="text-[10px] uppercase tracking-wider text-black/30 font-bold">Cmd + Enter 发送</span>
-                      <button 
+                      <button
                         onClick={(e) => {
                           const textarea = e.currentTarget.parentElement?.previousElementSibling as HTMLTextAreaElement;
                           handleTextSubmit(textarea.value);
@@ -662,7 +660,7 @@ export default function App() {
                 <div className="space-y-6">
                   {/* Question Display */}
                   <div className="bg-white rounded-3xl p-8 border border-black/5 shadow-sm relative">
-                    <button 
+                    <button
                       onClick={() => {
                         setCurrentQuestion(null);
                         setAnswerDraft('');
@@ -685,61 +683,96 @@ export default function App() {
                       </div>
                       {currentQuestion.options && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {currentQuestion.options.map((opt, i) => (
-                            <div key={i} className="p-4 bg-[#F9F9F7] rounded-2xl border border-black/5 hover:border-black/20 transition-colors cursor-pointer">
-                              {renderContent(opt)}
-                            </div>
-                          ))}
+                          {currentQuestion.options.map((opt, i) => {
+                            const optionLetter = opt.trim().charAt(0);
+                            const isSelected = answerDraft === optionLetter && currentQuestion.type === 'choice';
+                            return (
+                              <div
+                                key={i}
+                                onClick={() => {
+                                  if (currentQuestion.type === 'choice') {
+                                    setAnswerDraft(optionLetter);
+                                  }
+                                }}
+                                className={`p-4 rounded-2xl border transition-all ${
+                                  currentQuestion.type === 'choice'
+                                    ? 'cursor-pointer'
+                                    : ''
+                                } ${
+                                  isSelected
+                                    ? 'bg-black text-white border-black'
+                                    : 'bg-[#F9F9F7] border-black/5 hover:border-black/20'
+                                }`}
+                              >
+                                {renderContent(opt)}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   </div>
 
                   {/* Answering Area */}
-                  {!correction ? (
-                    <div className="bg-white rounded-3xl p-8 border border-black/5 shadow-sm">
-                      <h3 className="font-semibold mb-6 flex items-center gap-2">
-                        <ChevronRight className="w-4 h-4" />
-                        提交答案
-                      </h3>
-                      <div className="space-y-4">
-                        <textarea 
-                          placeholder="在此输入你的答案..."
-                          className="w-full h-32 p-4 bg-[#F9F9F7] rounded-2xl border border-black/5 focus:outline-none focus:border-black/20 transition-all resize-none"
-                          id="user-answer-input"
-                          value={answerDraft}
-                          onChange={(e) => setAnswerDraft(e.target.value)}
-                        />
-                        <div className="flex gap-4">
-                          <button 
-                            onClick={() => answerFileRef.current?.click()}
-                            className="flex-1 py-4 bg-[#F9F9F7] border border-black/5 rounded-2xl font-medium flex items-center justify-center gap-2 hover:bg-black/5 transition-colors"
-                          >
-                            <ImageIcon className="w-5 h-5" />
-                            上传手写过程
-                          </button>
-                          <button 
-                            onClick={() => handleCorrection(answerDraft)}
-                            className="flex-1 py-4 bg-black text-white rounded-2xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
-                          >
-                            <CheckCircle2 className="w-5 h-5" />
-                            智能批改
-                          </button>
-                        </div>
-                        <input 
-                          type="file" 
-                          ref={answerFileRef} 
-                          className="hidden" 
-                          accept="image/*" 
-                          onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            if (file) handleCorrection(answerDraft, file);
-                          }}
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <motion.div 
+                                    {!correction ? (
+                                      <div className="bg-white rounded-3xl p-8 border border-black/5 shadow-sm">
+                                        <h3 className="font-semibold mb-6 flex items-center gap-2">
+                                          <ChevronRight className="w-4 h-4" />
+                                          提交答案
+                                        </h3>
+                                        {currentQuestion.type === 'choice' ? (
+                                          <div className="space-y-4">
+                                            <div className="text-center text-black/40">
+                                              {answerDraft ? `已选择：${answerDraft}` : '请点击上方选项作答'}
+                                            </div>
+                                            <button
+                                              onClick={() => handleCorrection(answerDraft)}
+                                              disabled={!answerDraft}
+                                              className="w-full py-4 bg-black text-white rounded-2xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50"
+                                            >
+                                              <CheckCircle2 className="w-5 h-5" />
+                                              智能批改
+                                            </button>
+                                          </div>
+                                        ) : (
+                                          <div className="space-y-4">
+                                            <textarea
+                                              placeholder="在此输入你的答案..."
+                                              className="w-full h-32 p-4 bg-[#F9F9F7] rounded-2xl border border-black/5 focus:outline-none focus:border-black/20 transition-all resize-none"
+                                              id="user-answer-input"
+                                              value={answerDraft}
+                                              onChange={(e) => setAnswerDraft(e.target.value)}
+                                            />
+                                            <div className="flex gap-4">
+                                              <button
+                                                onClick={() => answerFileRef.current?.click()}
+                                                className="flex-1 py-4 bg-[#F9F9F7] border border-black/5 rounded-2xl font-medium flex items-center justify-center gap-2 hover:bg-black/5 transition-colors"
+                                              >
+                                                <ImageIcon className="w-5 h-5" />
+                                                上传手写过程
+                                              </button>
+                                              <button
+                                                onClick={() => handleCorrection(answerDraft)}
+                                                className="flex-1 py-4 bg-black text-white rounded-2xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
+                                              >
+                                                <CheckCircle2 className="w-5 h-5" />
+                                                智能批改
+                                              </button>
+                                            </div>
+                                            <input
+                                              type="file"
+                                              ref={answerFileRef}
+                                              className="hidden"
+                                              accept="image/*"
+                                              onChange={(e) => {
+                                                const file = e.target.files?.[0];
+                                                if (file) handleCorrection(answerDraft, file);
+                                              }}
+                                            />
+                                          </div>
+                                        )}
+                                      </div>
+                                    ) : (                    <motion.div
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
                       className="bg-white rounded-3xl p-8 border border-black/5 shadow-md space-y-6"
@@ -756,7 +789,7 @@ export default function App() {
                           </h3>
                           <p className="text-black/40 mt-1">得分: {correction.score} / 10.0</p>
                         </div>
-                        <button 
+                        <button
                           onClick={() => setCorrection(null)}
                           className="text-sm font-medium text-black/40 hover:text-black"
                         >
@@ -788,14 +821,14 @@ export default function App() {
                       )}
 
                       <div className="pt-6 border-t border-black/5 flex gap-4">
-                        <button 
+                        <button
                           onClick={handleGenerateVariants}
                           className="flex-1 py-3 bg-black text-white rounded-xl font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
                         >
                           <Plus className="w-4 h-4" />
                           生成变式训练 (3道)
                         </button>
-                        <button 
+                        <button
                           onClick={exportWrongQuestion}
                           className="px-6 py-3 bg-white border border-black/10 rounded-xl font-medium hover:bg-black/5 transition-colors"
                         >
@@ -804,7 +837,7 @@ export default function App() {
                       </div>
 
                       {variants.length > 0 && (
-                        <motion.div 
+                        <motion.div
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           className="space-y-6 pt-6 border-t border-black/5"
@@ -843,7 +876,7 @@ export default function App() {
           )}
 
           {activeTab === 'history' && (
-            <motion.div 
+            <motion.div
               key="history"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -858,11 +891,11 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              
+
               <div className="grid grid-cols-1 gap-4">
                 {questions.map((q) => (
-                  <div 
-                    key={q.id} 
+                  <div
+                    key={q.id}
                     onClick={() => {
                       setCurrentQuestion(q);
                       setActiveTab('collect');
@@ -889,7 +922,7 @@ export default function App() {
           )}
 
           {activeTab === 'settings' && (
-            <motion.div 
+            <motion.div
               key="settings"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -899,14 +932,14 @@ export default function App() {
               <section className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-black/30">处理策略</h3>
                 <div className="grid grid-cols-2 gap-4">
-                  <button 
+                  <button
                     onClick={() => setProcessMode('ocr_ai')}
                     className={`p-4 rounded-2xl border transition-all text-left ${processMode === 'ocr_ai' ? 'bg-black text-white border-black' : 'bg-white border-black/5 hover:border-black/20'}`}
                   >
                     <p className="font-bold">OCR + 简单 AI</p>
                     <p className={`text-[10px] mt-1 ${processMode === 'ocr_ai' ? 'text-white/60' : 'text-black/40'}`}>分层处理，节省 Token</p>
                   </button>
-                  <button 
+                  <button
                     onClick={() => setProcessMode('ai_direct')}
                     className={`p-4 rounded-2xl border transition-all text-left ${processMode === 'ai_direct' ? 'bg-black text-white border-black' : 'bg-white border-black/5 hover:border-black/20'}`}
                   >
@@ -922,7 +955,7 @@ export default function App() {
                   {processMode === 'ai_direct' ? (
                     <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
                       <label className="text-sm font-medium">识图 AI（拍照上传 / AI 一步到位）</label>
-                      <select 
+                      <select
                         value={imageAI.provider}
                         onChange={(e) => {
                           const nextProvider = e.target.value as Provider;
@@ -944,7 +977,7 @@ export default function App() {
                       )}
                       <select
                         value={imageAI.model}
-                        onChange={(e) => setImageAI({...imageAI, model: e.target.value})}
+                        onChange={(e) => setImageAI({ ...imageAI, model: e.target.value })}
                         className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                       >
                         {MODEL_OPTIONS[imageAI.provider].map((item) => (
@@ -953,10 +986,10 @@ export default function App() {
                           </option>
                         ))}
                       </select>
-                      <input 
+                      <input
                         type="password"
                         value={imageAI.apiKey}
-                        onChange={(e) => setImageAI({...imageAI, apiKey: e.target.value})}
+                        onChange={(e) => setImageAI({ ...imageAI, apiKey: e.target.value })}
                         placeholder="该功能使用的 API Key（可选）"
                         className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                       />
@@ -964,7 +997,7 @@ export default function App() {
                   ) : (
                     <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
                       <label className="text-sm font-medium">OCR + 简单处理 AI</label>
-                      <select 
+                      <select
                         value={ocrAI.provider}
                         onChange={(e) => {
                           const nextProvider = e.target.value as Provider;
@@ -983,7 +1016,7 @@ export default function App() {
                       </select>
                       <select
                         value={ocrAI.model}
-                        onChange={(e) => setOcrAI({...ocrAI, model: e.target.value})}
+                        onChange={(e) => setOcrAI({ ...ocrAI, model: e.target.value })}
                         className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                       >
                         {MODEL_OPTIONS[ocrAI.provider].map((item) => (
@@ -992,10 +1025,10 @@ export default function App() {
                           </option>
                         ))}
                       </select>
-                      <input 
+                      <input
                         type="password"
                         value={ocrAI.apiKey}
-                        onChange={(e) => setOcrAI({...ocrAI, apiKey: e.target.value})}
+                        onChange={(e) => setOcrAI({ ...ocrAI, apiKey: e.target.value })}
                         placeholder="该功能使用的 API Key（可选）"
                         className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                       />
@@ -1004,7 +1037,7 @@ export default function App() {
 
                   <div className="space-y-2 p-4 bg-white rounded-2xl border border-black/5">
                     <label className="text-sm font-medium">分析做法 AI（答案解析生成 / 批改 / 变式）</label>
-                    <select 
+                    <select
                       value={analysisAI.provider}
                       onChange={(e) => {
                         const nextProvider = e.target.value as Provider;
@@ -1023,7 +1056,7 @@ export default function App() {
                     </select>
                     <select
                       value={analysisAI.model}
-                      onChange={(e) => setAnalysisAI({...analysisAI, model: e.target.value})}
+                      onChange={(e) => setAnalysisAI({ ...analysisAI, model: e.target.value })}
                       className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                     >
                       {MODEL_OPTIONS[analysisAI.provider].map((item) => (
@@ -1032,10 +1065,10 @@ export default function App() {
                         </option>
                       ))}
                     </select>
-                    <input 
+                    <input
                       type="password"
                       value={analysisAI.apiKey}
-                      onChange={(e) => setAnalysisAI({...analysisAI, apiKey: e.target.value})}
+                      onChange={(e) => setAnalysisAI({ ...analysisAI, apiKey: e.target.value })}
                       placeholder="该功能使用的 API Key（可选）"
                       className="w-full p-3 bg-white border border-black/5 rounded-xl focus:outline-none focus:border-black/20"
                     />
@@ -1065,7 +1098,7 @@ export default function App() {
       {/* Loading Overlay */}
       <AnimatePresence>
         {loading && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}

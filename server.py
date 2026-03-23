@@ -52,7 +52,7 @@ for d in [DATA_DIR, USERS_DIR, QUESTIONS_DIR, VARIANTS_DIR]:
 
 SUPPORTED_MODELS = {
     "gemini": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro"],
-    "qwen": ["qwen-vl-max", "qwen-vl-plus", "qwen-max", "qwen-plus", "qwen-turbo"],
+    "qwen": ["qwen3-max", "qwen3.5-plus", "qwen3.5-flash", "qwen-vl-max", "qwen-vl-plus"],
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
     "kimi": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
 }
