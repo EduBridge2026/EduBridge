@@ -1184,18 +1184,18 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Loading Overlay */}
+      {/* Non-blocking Loading Hint */}
       <AnimatePresence>
         {loading && (
           <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] bg-white/60 backdrop-blur-sm flex items-center justify-center"
+            initial={{ opacity: 0, y: 8, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 8, scale: 0.98 }}
+            className="fixed bottom-6 right-6 z-[100] pointer-events-none"
           >
-            <div className="flex flex-col items-center gap-4">
-              <Loader2 className="w-10 h-10 animate-spin text-black" />
-              <p className="text-sm font-medium animate-pulse">{loadingMessage}</p>
+            <div className="flex items-center gap-3 bg-white border border-black/10 shadow-lg rounded-2xl px-4 py-3">
+              <Loader2 className="w-4 h-4 animate-spin text-black/70" />
+              <p className="text-xs font-medium text-black/70">{loadingMessage}</p>
             </div>
           </motion.div>
         )}
