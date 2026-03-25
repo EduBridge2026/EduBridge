@@ -748,6 +748,8 @@ export default function App() {
                     <button 
                       onClick={() => {
                         setCurrentQuestion(null);
+                        setCorrection(null);
+                        setVariants([]);
                         setAnswerDraft('');
                       }}
                       className="absolute top-6 right-6 p-2 hover:bg-black/5 rounded-full transition-colors"
@@ -988,6 +990,8 @@ export default function App() {
                     key={q.id} 
                     onClick={() => {
                       setCurrentQuestion(q);
+                      setCorrection(null);
+                      setVariants([]);
                       setActiveTab('collect');
                       setAnswerDraft('');
                     }}

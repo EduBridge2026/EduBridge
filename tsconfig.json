@@ -1,26 +1,2 @@
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "experimentalDecorators": true,
-    "useDefineForClassFields": false,
-    "module": "ESNext",
-    "lib": [
-      "ES2022",
-      "DOM",
-      "DOM.Iterable"
-    ],
-    "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "allowJs": true,
-    "jsx": "react-jsx",
-    "paths": {
-      "@/*": [
-        "./*"
-      ]
-    },
-    "allowImportingTsExtensions": true,
-    "noEmit": true
-  }
-}
+// 我的mac耗电量很大，我怀疑是这个的问题
+{"compilerOptions":{"target":"ESNext","module":"ESNext","moduleResolution":"node","jsx":"react-jsx","strict":true,"skipLibCheck":true,"forceConsistentCasingInFileNames":true,"esModuleInterop":true,"isolatedModules":true},"include":["src"],"exclude":["node_modules","dist","build",".next","out"]}
